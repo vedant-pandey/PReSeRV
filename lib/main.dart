@@ -3,10 +3,11 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
-// import 'package:geolocator/geolocator.dart';
+import 'package:geoflutterfire/geoflutterfire.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:rxdart/rxdart.dart';
 
 void main() => runApp(
   MaterialApp(
@@ -118,21 +119,20 @@ class FireMapState extends State<FireMap> {
   GoogleMapController mapController;
   Location location = new Location();
   http.Response response;
-  String disp='Please click the play button to get the speed';
+  String disp;
+  Firestore firestore =Firestore.instance;
+  Geoflutterfire geo =Geoflutterfire();
+  BehaviorSubject<double> radius =BehaviorSubject(seedValue: 100.0);
+  Stream<dynamic> query;
+  StreamSubscription subscription;
 
   @override
   void initState(){
     super.initState();
-    // _getStatus();
+    disp='Please click the play button to get the speed';
   }
 
-  // void _getStatus() async {
-  //   geolocationStatus = await Geolocator().checkGeolocationPermissionStatus();
-  //   print(geolocationStatus);
-  // }
-
   build(context) {
-    // location.getLocation().then(onValue)
     return Stack(children: <Widget>[
       GoogleMap(
         initialCameraPosition: CameraPosition(
@@ -150,7 +150,7 @@ class FireMapState extends State<FireMap> {
           FlatButton(
             child: Icon(Icons.pin_drop,color: Colors.white),
             color: Colors.green,
-            onPressed:  _addMarker
+            onPressed:  _addGeoPoint
           ),
       ),
       Positioned(
@@ -162,6 +162,20 @@ class FireMapState extends State<FireMap> {
             color: Colors.blue,
             onPressed:  getSpeed
           ),
+      ),
+      Positioned(
+        top: 50,
+        left: 10,
+        child: Slider(
+          min: 100.0,
+          max: 500.0,
+          divisions: 4,
+          value: radius.value,
+          label: 'Radius ${radius.value}km',
+          activeColor: Colors.green,
+          inactiveColor: Colors.green.withOpacity(0.2),
+          onChanged: _updateQuery,
+        )
       ),
       Positioned(
         top: 50,
@@ -185,8 +199,6 @@ class FireMapState extends State<FireMap> {
 
   void getSpeed() async {
     var position=mapController.cameraPosition.target;
-    // print(position.latitude);
-    // print(position.longitude);
     String la1=position.latitude.toString();
     String la2=(position.latitude+0.00001).toString();
     String la3=(position.latitude+0.00002).toString();
@@ -196,7 +208,7 @@ class FireMapState extends State<FireMap> {
     String param='path='+la1+','+lo1+'|'+la2+','+lo2+'|'+la3+','+lo3;
     String t='AIzaSyAZHZCliFwEcm6AlLeRuctFCqIY-aBGaGE';
     String t2='AIzaSyCZSwJSBuEa7EfBHqBAaYkEy-tbOKdHOa4';
-    String uri = 'https://roads.googleapis.com/v1/speedLimits?'+param+'&key='+t;
+    String uri = 'https://roads.googleapis.com/v1/speedLimits?'+param+'&key='+t2;
     http.Response curResponse = await http.get(
       Uri.encodeFull(uri)
     );
@@ -217,7 +229,7 @@ class FireMapState extends State<FireMap> {
         builder: (BuildContext context){
           return AlertDialog(
             title: new Text('Daily quota reached'),
-            content: new Text("Sorry! But you can use only one request per day if you're using the student plan. "+jsondecoded['error']['message']),
+            content: new Text("Sorry! But you can use only one request per day if you're using the basic plan. "+jsondecoded['error']['message']),
             actions: <Widget>[
               new FlatButton(
                 child: new Text('Ok'),
@@ -238,15 +250,6 @@ class FireMapState extends State<FireMap> {
     });
   }
 
-  _addMarker(){
-    var marker = MarkerOptions(
-      position: mapController.cameraPosition.target,
-      icon: BitmapDescriptor.defaultMarker,
-      infoWindowText: InfoWindowText('Your location', '')
-    );
-    print(mapController.cameraPosition.target);
-    mapController.addMarker(marker);
-  }
 
   _animateToUser() async {
     var pos = await location.getLocation();
@@ -258,6 +261,77 @@ class FireMapState extends State<FireMap> {
         )
       )
     );
+  }
+
+  Future<DocumentReference> _addGeoPoint() {
+    var marker = MarkerOptions(
+      position: mapController.cameraPosition.target,
+      icon: BitmapDescriptor.defaultMarker,
+      infoWindowText: InfoWindowText('Your location', '')
+    );
+    print(mapController.cameraPosition.target);
+    mapController.addMarker(marker);
+    var pos =mapController.cameraPosition.target;
+    GeoFirePoint point = geo.point(latitude: pos.latitude, longitude: pos.longitude);
+    return firestore.collection('locations').add({
+      'position':point.data,
+      'name':'Location query'
+    });
+  }
+
+  void _updateMarkers(List<DocumentSnapshot> documentList){
+    // mapController.clearMarkers();
+    documentList.forEach((DocumentSnapshot document){
+      GeoPoint pos =document.data['position']['geopoint'];
+      double distance =document.data['distance'];
+      var marker =MarkerOptions(
+        position: mapController.cameraPosition.target,
+        icon: BitmapDescriptor.defaultMarker,
+        infoWindowText: InfoWindowText('Your location', '$distance km from center point')
+      );
+      mapController.addMarker(marker);
+    });
+  }
+
+  _startQuery(){
+    var pos =mapController.cameraPosition.target;
+    double lat=pos.latitude;
+    double lng=pos.longitude;
+    var ref =firestore.collection('locations');
+    GeoFirePoint center = geo.point(latitude: lat,longitude: lng);
+
+    subscription =radius.switchMap((rad){
+      return geo.collection(collectionRef: ref).within(
+        center: center,
+        radius: rad,
+        field: 'position',
+        strictMode: true
+      );
+    }).listen(_updateMarkers);
+  }
+
+  _updateQuery(value) {
+
+    final zoomMap = {
+      100.0: 12.0,
+      200.0: 10.0,
+      300.0: 7.0,
+      400.0: 6.0,
+      500.0: 5.0
+    };
+
+    final zoom =zoomMap[value];
+    mapController.moveCamera(CameraUpdate.zoomTo(zoom));
+
+    setState(() {
+      radius.add(value);
+    });
+  }
+
+  @override
+  dispose() {
+    subscription.cancel();
+    super.dispose();
   }
 
 }
